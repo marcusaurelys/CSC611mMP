@@ -36,12 +36,12 @@ class Crawler:
         
         print(f"Initialized crawler on {self.start_url} with {self.nodes} nodes for {self.minutes} minutes...")
 
-    def worker(self, timer):
+    def worker(self, timer, i):
         while not timer.is_done():
             try:
                 url = self.frontier.get(timeout=1) #timeout so this doesn't block forever...
             except:
-                print(f"[THREAD {threading.get_ident()}]: waiting for input")
+                print(f"[THREAD {i}]: waiting for input")
                 continue
 
             with self.seen_lock: #if url is in seen stop here, otherwise add it to seen
@@ -50,7 +50,7 @@ class Crawler:
                 self.seen.add(url)
             
             try:
-                print(f"[THREAD {threading.get_ident()}]: Scraping {url}")
+                print(f"[THREAD {i}]: Scraping {url}")
                 res = requests.get(url)
                 soup = BeautifulSoup(res.text, "html.parser")
                 title = soup.title.string if soup.title else "No title"
@@ -69,7 +69,7 @@ class Crawler:
                 
                 for child in children:
                     self.frontier.put(child)
-                print(f"[THREAD {threading.get_ident()}]: Done scraping {url} children added to frontier")
+                print(f"[THREAD {i}]: Done scraping {url}, children added to frontier")
                 #sleep so we dont die
                 time.sleep(1.5)
             except:
@@ -81,11 +81,8 @@ class Crawler:
         self.frontier.put(self.start_url)
         with ThreadPoolExecutor(max_workers=self.nodes) as pool: 
             t = Timer(self.minutes)
-            futures = [
-                pool.submit(self.worker, t)
-                for _ in range(self.nodes)
-            ]
-
+            for i in range(self.nodes):
+                pool.submit(self.worker, t, i+1)
             while not t.is_done():
                 time.sleep(1)
 
