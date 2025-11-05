@@ -64,6 +64,8 @@ class Crawler:
                     child = link["href"]
                     if child.startswith("/"):
                         child = self.start_url + child
+                    if child.endswith("/"):
+                        child = child[:-1]
                     if child.startswith(self.start_url):
                         children.append(child)
                 
@@ -71,7 +73,7 @@ class Crawler:
                     self.frontier.put(child)
                 print(f"[THREAD {i}]: Done scraping {url}, children added to frontier")
                 #sleep so we dont die
-                time.sleep(1.5)
+                time.sleep(3)
             except:
                 continue
 
