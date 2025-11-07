@@ -42,7 +42,7 @@ class Crawler:
         self.seen_lock = threading.Lock()
         self.results = dict()               # Contains the URLs that were done being scraped
         self.res_lock = threading.Lock()
-        self.total_urls_found = set()       # URLs discovered during the crawl (already scraped or never got processed before the timer ended)
+        self.total_urls_found = set()       # URLs discovered during the crawl (never got processed before the timer ended)
         self.url_lock = threading.Lock()  
         
         mode = f"{self.nodes} nodes" if self.nodes is not None else "single-threaded (no pool)"
@@ -96,7 +96,6 @@ class Crawler:
                 for link in soup.find_all("a", href=True):
                     child = link["href"].strip()
                     
-                   # basic normalization similar to your original approach
                     if child.startswith("/"):
                         child = self.start_url.rstrip("/") + child
 
@@ -108,14 +107,15 @@ class Crawler:
                     if child.endswith("/"):
                         child = child[:-1]
 
-                    # Stay under the same site root you provided originally
                     if child.startswith(self.start_url):
                         children.append(child)
                 
                 for child in children:
                     with self.url_lock:
-                        self.total_urls_found.add(child)
-                    self.frontier.put(child)
+                        #ayusin ko lang logic: if already in the queue, no need to add to the frontier, this is the reason kaya sobrang laki ng frontier natin kanina. we know that it's in the queue if andito na siya sa set ng total_urls_found. 
+                        if child not in self.total_urls_found:
+                            self.total_urls_found.add(child)
+                            self.frontier.put(child)
                     
                 print(f"[THREAD {i}]: Done scraping {url}, children added to frontier")
                 
