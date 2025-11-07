@@ -18,6 +18,9 @@ class Timer:
     def _run(self):
         time.sleep(self.minutes * 60)
         self.done.set()
+    
+    def stop(self):
+        self.done.set()
 
     def is_done(self):
         return self.done.is_set()
@@ -38,7 +41,7 @@ class Crawler:
         assert isinstance(self.minutes, float), "Mali minutes"
         
         self.frontier = queue.Queue()       # FIFO Queue for Search
-        self.seen = set()                   # Contains the unique URLs
+        self.seen = set()                   # Contains the unique explored URLs
         self.seen_lock = threading.Lock()
         self.results = dict()               # Contains the URLs that were done being scraped
         self.res_lock = threading.Lock()
@@ -139,6 +142,12 @@ class Crawler:
             with ThreadPoolExecutor(max_workers=self.nodes) as pool:
                 for i in range(self.nodes):
                     pool.submit(self.worker, t, i+1)
+                
+                with self.seen_lock: #this is risky, but we're sure the worker threads only need one lock at a time.
+                    with self.url_lock:
+                        if len(self.seen) == len(self.total_urls_found):
+                            t.self.stop()
+                
                 while not t.is_done():
                     time.sleep(1)
 
