@@ -112,7 +112,7 @@ class Crawler:
                 
                 with self.url_lock:
                     for child in children: 
-                            if child not in self.total_urls_found:
+                            if child not in self.total_urls_found: #only add the child if its not yet seen at all.
                                 self.total_urls_found.add(child)
                                 self.frontier.put(child)
                     
