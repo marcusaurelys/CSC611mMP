@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
 PDF_EXTENSIONS = (".pdf",)
-HTML_MIME_PREFIXES = ("text/html", "application/xhtml+xml")
+HTML_MIME_PREFIXES = ("text/html", "application/xhtml+xml", "application/pdf")
 REQUEST_HEADERS = {"User-Agent": "CSC611M-Crawler/1.0 (+student project)"}
 
 class Timer:
@@ -26,21 +26,27 @@ class Timer:
 class Crawler:
     def __init__(self, url, nodes, minutes):
         self.start_url = url
-        self.nodes = int(nodes)
+        
+        if nodes is None:
+            self.nodes = None
+        else:
+            self.nodes = int(nodes)
+            
         self.minutes = float(minutes)
         assert isinstance(self.start_url, str), "Mali url"
-        assert isinstance(self.nodes, int), "Mali nodes"
+        assert (self.nodes is None) or isinstance(self.nodes, int), "Mali nodes"
         assert isinstance(self.minutes, float), "Mali minutes"
         
-        self.frontier = queue.Queue()
-        self.seen = set()
+        self.frontier = queue.Queue()       # FIFO Queue for Search
+        self.seen = set()                   # Contains the unique URLs
         self.seen_lock = threading.Lock()
-        self.results = dict()
+        self.results = dict()               # Contains the URLs that were done being scraped
         self.res_lock = threading.Lock()
-        self.total_urls_found = set()
-        self.url_lock = threading.Lock()
+        self.total_urls_found = set()       # URLs discovered during the crawl (already scraped or never got processed before the timer ended)
+        self.url_lock = threading.Lock()  
         
-        print(f"Initialized crawler on {self.start_url} with {self.nodes} nodes for {self.minutes} minutes...")
+        mode = f"{self.nodes} nodes" if self.nodes is not None else "single-threaded (no pool)"
+        print(f"Initialized crawler on {self.start_url} with {mode} nodes for {self.minutes} minutes...")
     
     def _is_pdf_url(self, url: str) -> bool:
         # quick URL-level filter (case-insensitive)
@@ -60,11 +66,6 @@ class Crawler:
             except:
                 print(f"[THREAD {i}]: waiting for input")
                 continue
-                
-            # Skip URLs that look like PDFs outright
-            if self._is_pdf_url(url):
-                # print(f"[THREAD {i}]: Skipping PDF link {url}")
-                continue
 
             with self.seen_lock: #if url is in seen stop here, otherwise add it to seen
                 if url in self.seen:
@@ -82,14 +83,14 @@ class Crawler:
                     
                 # Skip non-HTML responses, including PDFs served without .pdf in the URL
                 if not self._is_html_response(res):
-                    # print(f"[THREAD {i}]: Skipping non-HTML content at {url} (Content-Type={res.headers.get('Content-Type')})")
+                    print(f"[THREAD {i}]: Skipping non-HTML content at {url} (Content-Type={res.headers.get('Content-Type')})")
                     continue
                 
                 soup = BeautifulSoup(res.text, "html.parser")
-                title = soup.title.string if soup.title else "No title"
-
-                with self.res_lock:
-                    self.results[url] = title
+                if self._is_pdf_url(url):
+                    title = "PDF File"
+                else:
+                    title = soup.title.string if soup.title else "No title"
 
                 children = []
                 for link in soup.find_all("a", href=True):
@@ -109,9 +110,6 @@ class Crawler:
 
                     # Stay under the same site root you provided originally
                     if child.startswith(self.start_url):
-                        # Do not enqueue PDF links
-                        if self._is_pdf_url(child):
-                            continue
                         children.append(child)
                 
                 for child in children:
@@ -120,6 +118,10 @@ class Crawler:
                     self.frontier.put(child)
                     
                 print(f"[THREAD {i}]: Done scraping {url}, children added to frontier")
+                
+                with self.res_lock:
+                    self.results[url] = title
+                
                 #sleep so we dont die
                 time.sleep(3)
             except:
@@ -127,20 +129,28 @@ class Crawler:
 
     def crawl(self):
         self.frontier.put(self.start_url)
-        with ThreadPoolExecutor(max_workers=self.nodes) as pool: 
-            t = Timer(self.minutes)
-            for i in range(self.nodes):
-                pool.submit(self.worker, t, i+1)
+        t = Timer(self.minutes)
+        
+        if self.nodes is None:
+            # Sequential Mode: no thread pool, run worker in the main thread
+            self.worker(t, i="MAIN")
             while not t.is_done():
                 time.sleep(1)
+        else:
+            with ThreadPoolExecutor(max_workers=self.nodes) as pool:
+                for i in range(self.nodes):
+                    pool.submit(self.worker, t, i+1)
+                while not t.is_done():
+                    time.sleep(1)
 
         print("Done crawling!")
 
         with open("results.txt", "w", encoding="utf-8") as f:
             f.write(
-                f"number of pages scraped: {len(self.seen)} \n"
+                f"number of pages scraped: {len(self.results)} \n"
                 f"number of urls found: {len(self.total_urls_found)} \n"
-                f"number of unique urls accessed: {len(self.results)}"
+                f"number of unique urls accessed: {len(self.seen)} \n"
+                f"pending in frontier: {self.frontier.qsize()}"     # pages that weren't scraped due to time limit
             )
         print("Saved text file...")
 
