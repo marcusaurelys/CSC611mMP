@@ -110,12 +110,11 @@ class Crawler:
                     if child.startswith(self.start_url):
                         children.append(child)
                 
-                for child in children:
-                    with self.url_lock:
-                        #ayusin ko lang logic: if already in the queue, no need to add to the frontier, this is the reason kaya sobrang laki ng frontier natin kanina. we know that it's in the queue if andito na siya sa set ng total_urls_found. 
-                        if child not in self.total_urls_found:
-                            self.total_urls_found.add(child)
-                            self.frontier.put(child)
+                with self.url_lock:
+                    for child in children: 
+                            if child not in self.total_urls_found:
+                                self.total_urls_found.add(child)
+                                self.frontier.put(child)
                     
                 print(f"[THREAD {i}]: Done scraping {url}, children added to frontier")
                 
