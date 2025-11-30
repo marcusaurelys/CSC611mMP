@@ -2,3 +2,5 @@
 __pycache__
 results.txt
 sites.csv
+distributed_results.txt
+distributed_sites.csv
