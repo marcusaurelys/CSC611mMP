@@ -8,6 +8,7 @@ import urllib.parse
 from typing import Iterable
 
 import Pyro5.api
+from Pyro5 import errors as pyro_errors
 import requests
 from bs4 import BeautifulSoup
 
@@ -41,8 +42,28 @@ class Coordinator:
         self.frontier.put(self.start_url)
         self.discovered.add(self.start_url)
         
+        self.active_workers: set[str] = set()
+        
         self._timer = threading.Thread(target=self._countdown, args=(minutes,), daemon=True)
         self._timer.start()
+    
+    def register_worker(self, worker_id: str) -> None:
+        with self.lock:
+            self.active_workers.add(worker_id)
+        print(f"[COORD] Worker registered: {worker_id}")
+
+    def unregister_worker(self, worker_id: str) -> None:
+        with self.lock:
+            self.active_workers.discard(worker_id)
+        print(f"[COORD] Worker unregistered: {worker_id}")
+
+    def can_shutdown(self) -> bool:
+        # Only allow daemon to stop once:
+        #   1) timer fired (stop_event set), AND
+        #   2) no more active workers
+        with self.lock:
+            return self.stop_event.is_set() and not self.active_workers
+
     
     def _countdown(self, minutes: float) -> None:
         time.sleep(minutes * 60)
@@ -57,9 +78,8 @@ class Coordinator:
             print(f"[COORD] Assigned {url} to {worker_id}")
             return url
         except queue.Empty:
-            print(f"[COORD] Frontier drained; stopping crawl")
-            self.stop_event.set()
-            return None
+            print(f"[COORD] Frontier drained; waiting for new URLs...")
+            return "WAITING"
         
         
     def submit_page(self, worker_id: str, url: str, title: str, links: Iterable[str]) -> None:
@@ -105,44 +125,81 @@ class Coordinator:
 
 
 class CrawlWorker:
-    def __init__(self, coordinator_uri: str, start_url: str, worker_id: str, hmac_secret: str | None):
+    def __init__(self, coordinator_uri: str, start_url: str, worker_id: str):
         self.proxy = Pyro5.api.Proxy(coordinator_uri)
         self.start_url = start_url.rstrip("/")
         self.worker_id = worker_id
         self.session = requests.Session()
         self.session.headers.update(REQUEST_HEADERS)
+        
+        self.proxy.register_worker(self.worker_id)
 
     def run(self) -> None:
-        while True:
-            url = self.proxy.request_url(self.worker_id)
-            if url is None:
-                if self.proxy.should_stop():
+        try:
+            while True:
+                try:
+                    url = self.proxy.request_url(self.worker_id)
+                except Pyro5.errors.CommunicationError:
+                    # Coordinator went away unexpectedly
                     break
-                time.sleep(1)
-                continue
-            self._crawl(url)
-        print(f"[WORKER {self.worker_id}] Stopping crawl as instructed by coordinator")
+
+                if url is None:
+                    if self.proxy.should_stop():
+                        break
+                    time.sleep(1)
+                    continue
+                elif url == "WAITING":
+                    time.sleep(1)
+                    continue
+
+                self._crawl(url)
+        finally:
+            # Even if we got an exception, try to unregister once
+            try:
+                self.proxy.unregister_worker(self.worker_id)
+            except Exception:
+                pass
+            print(f"[WORKER {self.worker_id}] Stopping crawl as instructed by coordinator")
+
 
     def _crawl(self, url: str) -> None:
+        self.session.max_redirects = 10
         try:
-            resp = self.session.get(url, timeout=10)
+            resp = self.session.get(url, timeout=10, allow_redirects=True)
+            resp.raise_for_status()
+        except requests.exceptions.TooManyRedirects as exc:
+            # Avoid infinite redirects; just report and stop this URL
+            try:
+                self.proxy.report_failure(self.worker_id, url, f"TooManyRedirects: {exc}")
+            except pyro_errors.CommunicationError:
+                # Coordinator already gone; just ignore
+                pass
+            return
         except Exception as exc:
-            self.proxy.report_failure(self.worker_id, url, str(exc))
+            try:
+                self.proxy.report_failure(self.worker_id, url, str(exc))
+            except pyro_errors.CommunicationError:
+                pass
             return
-        
-        if resp.status_code != 200:
-            self.proxy.report_failure(self.worker_id, url, f"HTTP {resp.status_code}")
-            return
-        
+
         if not is_html_response(resp):
-            self.proxy.report_failure(self.worker_id, url, "Non-HTML content")
+            try:
+                self.proxy.report_failure(self.worker_id, url, "Non-HTML content")
+            except pyro_errors.CommunicationError:
+                pass
             return
 
         soup = BeautifulSoup(resp.text, "html.parser")
         title = soup.title.string.strip() if soup.title else "No title"
         links = [a.get("href") for a in soup.find_all("a", href=True)]
-        self.proxy.submit_page(self.worker_id, url, title, links)
-        time.sleep(0.5) # polite crawling delay
+
+        try:
+            self.proxy.submit_page(self.worker_id, url, title, links)
+        except pyro_errors.CommunicationError:
+            # Coordinator is gone; no point continuing
+            return
+
+        time.sleep(0.5)  # polite crawling delay
 
 
 def persist_results(coordinator: Coordinator) -> None:
@@ -163,19 +220,19 @@ def persist_results(coordinator: Coordinator) -> None:
     print("Saved distributed_results.txt and distributed_sites.csv")
 
 
-def start_coordinator(start_url: str, minutes: float, host: str, port: int, hmac_secret: str | None) -> None:
+def start_coordinator(start_url: str, minutes: float, host: str, port: int) -> None:
     coordinator = Coordinator(start_url, minutes)
     with Pyro5.api.Daemon(host=host, port=port) as daemon:
         uri = daemon.register(coordinator, objectId="crawler.coordinator")
         print(f"[COORD] Coordinator is running at: {uri}")
         print("[COORD] Waiting for workers to connect...")
-        daemon.requestLoop(loopCondition=lambda: not coordinator.should_stop())
+        daemon.requestLoop(loopCondition=lambda: not coordinator.can_shutdown())
     
     persist_results(coordinator)
 
 
-def start_worker(uri: str, start_url: str, worker_id: str, hmac_secret: str | None) -> None:
-    worker = CrawlWorker(uri, start_url, worker_id, hmac_secret)
+def start_worker(uri: str, start_url: str, worker_id: str) -> None:
+    worker = CrawlWorker(uri, start_url, worker_id)
     print(f"[WORKER {worker_id}] Starting crawl")
     worker.run()
     
@@ -188,13 +245,11 @@ def parse_args():
     coord.add_argument("minutes", type=float)
     coord.add_argument("--host", default="0.0.0.0")
     coord.add_argument("--port", type=int, default=9090)
-    coord.add_argument("--hmac-secret", default=None, dest="hmac_secret")
     
     worker = subparsers.add_parser("worker", help="Start a crawl worker")
     worker.add_argument("--uri", required=True, help="URI of the coordinator")
     worker.add_argument("--start-url", required=True, dest="start_url")
     worker.add_argument("--worker-id", default="remote")
-    worker.add_argument("--hmac-secret", default=None, dest="hmac_secret")
     
     return parser.parse_args()
 
@@ -206,15 +261,13 @@ def main():
             start_url=args.start_url,
             minutes=args.minutes,
             host=args.host,
-            port=args.port,
-            hmac_secret=args.hmac_secret,
+            port=args.port
         )
     elif args.role == "worker":
         start_worker(
             uri=args.uri,
             start_url=args.start_url,
-            worker_id=args.worker_id,
-            hmac_secret=args.hmac_secret,
+            worker_id=args.worker_id
         )
 
 if __name__ == "__main__":
