@@ -12,8 +12,13 @@ from Pyro5 import errors as pyro_errors
 import requests
 from bs4 import BeautifulSoup
 
+PDF_EXTENSIONS = (".pdf",)
 REQUEST_HEADERS = { "User-Agent": "CSC611M-Distributed-Crawler (+student project)" }
 HTML_MIME_PREFIXES = ("text/html", "application/xhtml+xml", "application/pdf")
+
+def _is_pdf_url(url: str) -> bool:
+    # quick URL-level filter (case-insensitive)
+    return url.lower().endswith(PDF_EXTENSIONS)
 
 def is_html_response(resp: requests.Response) -> bool:
     ctype = resp.headers.get("Content-Type", "").lower()
@@ -88,23 +93,30 @@ class Coordinator:
             self.visited.add(url)
             self.results[url] = title
             
-            for link in link_list:
-                normalized = normalize_url(url, link)
-                if not normalized:
-                    continue
-                parsed = urllib.parse.urlparse(normalized)
-                if parsed.netloc != self.start_netloc:
-                    continue
-                if normalized.endswith("/"):
-                    normalized = normalized[:-1]
-                if normalized in self.discovered:
-                    continue
-                self.discovered.add(normalized)
-                self.frontier.put(normalized)
-            link_count = len(link_list)
+            # If we've already decided to stop, don't enqueue any new links
+            if self.stop_event.is_set():
+                print(f"[COORD] Stop flag set; not enqueuing new links from {url}")
+                link_count = 0
+            else:
+                for link in link_list:
+                    normalized = normalize_url(url, link)
+                    if not normalized:
+                        continue
+                    parsed = urllib.parse.urlparse(normalized)
+                    if parsed.netloc != self.start_netloc:
+                        continue
+                    if normalized.endswith("/"):
+                        normalized = normalized[:-1]
+                    if normalized in self.discovered:
+                        continue
+                    self.discovered.add(normalized)
+                    self.frontier.put(normalized)
+                link_count = len(link_list)
         print(f"[COORD] {worker_id} submitted {url} with {link_count} links")
     
     def report_failure(self, worker_id: str, url: str, reason: str) -> None:
+        with self.lock:
+            self.visited.add(url)   # mark as visited even on failure
         print(f"[COORD] {worker_id} failed {url}: {reason}")
         
     def should_stop(self) -> bool:
@@ -141,18 +153,23 @@ class CrawlWorker:
                     url = self.proxy.request_url(self.worker_id)
                 except Pyro5.errors.CommunicationError:
                     # Coordinator went away unexpectedly
+                    print(f"[WORKER {self.worker_id}] Lost connection to coordinator, exiting")
                     break
 
                 if url is None:
                     if self.proxy.should_stop():
+                        print(f"[WORKER {self.worker_id}] Coordinator requested stop")
                         break
                     time.sleep(1)
                     continue
                 elif url == "WAITING":
+                    print(f"[WORKER {self.worker_id}] No work yet, waiting...")
                     time.sleep(1)
                     continue
-
+                
+                print(f"[WORKER {self.worker_id}] Crawling {url}")
                 self._crawl(url)
+                print(f"[WORKER {self.worker_id}] Finished {url}")
         finally:
             # Even if we got an exception, try to unregister once
             try:
@@ -169,6 +186,8 @@ class CrawlWorker:
             resp.raise_for_status()
         except requests.exceptions.TooManyRedirects as exc:
             # Avoid infinite redirects; just report and stop this URL
+            msg = f"{type(exc).__name__}: {exc}"
+            print(f"[WORKER {self.worker_id}] Error fetching {url}: {msg}")
             try:
                 self.proxy.report_failure(self.worker_id, url, f"TooManyRedirects: {exc}")
             except pyro_errors.CommunicationError:
@@ -181,8 +200,20 @@ class CrawlWorker:
             except pyro_errors.CommunicationError:
                 pass
             return
+        
+        # If coordinator decided to stop while we were downloading, bail out now
+        try:
+            if self.proxy.should_stop():
+                print(f"[WORKER {self.worker_id}] Stop requested after downloading {url}, skipping parse/submit")
+                # mark this as "accessed but not scraped"
+                self.proxy.report_failure(self.worker_id, url, "Skipped due to shutdown")
+                return
+        except pyro_errors.CommunicationError:
+            # Coordinator is gone; just stop quietly.
+            return
 
         if not is_html_response(resp):
+            print(f"[WORKER {self.worker_id}] Non-HTML / PDF content at {url}")
             try:
                 self.proxy.report_failure(self.worker_id, url, "Non-HTML content")
             except pyro_errors.CommunicationError:
@@ -190,8 +221,20 @@ class CrawlWorker:
             return
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.title.string.strip() if soup.title else "No title"
+        if _is_pdf_url(url):
+            title = "PDF File"
+        else:
+            title = soup.title.string.strip() if soup.title else "No title"
         links = [a.get("href") for a in soup.find_all("a", href=True)]
+        
+        # another stop check here
+        try:
+            if self.proxy.should_stop():
+                print(f"[WORKER {self.worker_id}] Stop requested while scraping {url}, not submitting to coordinator")
+                self.proxy.report_failure(self.worker_id, url, "Skipped due to shutdown")
+                return
+        except pyro_errors.CommunicationError:
+            return
 
         try:
             self.proxy.submit_page(self.worker_id, url, title, links)
