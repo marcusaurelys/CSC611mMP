@@ -247,14 +247,14 @@ class CrawlWorker:
 
 def persist_results(coordinator: Coordinator) -> None:
     with coordinator.lock:
-        with open("distributed_results.txt", "w", encoding="utf-8") as f:
+        with open("./outputs/distributed_results.txt", "w", encoding="utf-8") as f:
             f.write(
                 f"number of pages scraped: {len(coordinator.results)}\n"
                 f"number of urls discovered: {len(coordinator.discovered)}\n"
                 f"number of unique urls accessed: {len(coordinator.visited)}\n"
             )
         
-        with open("distributed_sites.csv", "w", encoding="utf-8") as f:
+        with open("./outputs/distributed_sites.csv", "w", encoding="utf-8") as f:
             f.write("link,title\n")
             for link, title in coordinator.results.items():
                 safe_title = (title or "").replace('"', '""')
@@ -295,23 +295,3 @@ def parse_args():
     worker.add_argument("--worker-id", default="remote")
     
     return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    if args.role == "coordinator":
-        start_coordinator(
-            start_url=args.start_url,
-            minutes=args.minutes,
-            host=args.host,
-            port=args.port
-        )
-    elif args.role == "worker":
-        start_worker(
-            uri=args.uri,
-            start_url=args.start_url,
-            worker_id=args.worker_id
-        )
-
-if __name__ == "__main__":
-    main()
