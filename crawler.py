@@ -146,7 +146,7 @@ class Crawler:
                 with self.seen_lock: #this is risky, but we're sure the worker threads only need one lock at a time.
                     with self.url_lock:
                         if len(self.seen) == len(self.total_urls_found):
-                            t.self.stop()
+                            t.stop()
                 
                 while not t.is_done():
                     time.sleep(1)
@@ -158,7 +158,6 @@ class Crawler:
                 f"number of pages scraped: {len(self.results)} \n"
                 f"number of urls found: {len(self.total_urls_found)} \n"
                 f"number of unique urls accessed: {len(self.seen)} \n"
-                f"pending in frontier: {self.frontier.qsize()}"     # pages that weren't scraped due to time limit
             )
         print("Saved text file...")
 
