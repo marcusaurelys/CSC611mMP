@@ -137,85 +137,126 @@ class Coordinator:
 
 
 class CrawlWorker:
-    def __init__(self, coordinator_uri: str, start_url: str, worker_id: str):
-        self.proxy = Pyro5.api.Proxy(coordinator_uri)
+    def __init__(self, coordinator_uri: str, start_url: str, worker_id: str, num_threads: int = 1):
+        # Store URI instead of a single shared proxy
+        self.coordinator_uri = coordinator_uri
         self.start_url = start_url.rstrip("/")
         self.worker_id = worker_id
-        self.session = requests.Session()
-        self.session.headers.update(REQUEST_HEADERS)
-        
-        self.proxy.register_worker(self.worker_id)
+        self.num_threads = num_threads
+
+        # One proxy just for register/unregister in main thread
+        self._control_proxy = Pyro5.api.Proxy(coordinator_uri)
+        self._control_proxy.register_worker(self.worker_id)
 
     def run(self) -> None:
+        print(f"[WORKER {self.worker_id}] Starting with {self.num_threads} local threads")
+
+        threads: list[threading.Thread] = []
+        for idx in range(self.num_threads):
+            t = threading.Thread(
+                target=self._thread_main,
+                args=(idx + 1,),
+                daemon=True
+            )
+            t.start()
+            threads.append(t)
+
+        try:
+            # Wait for all worker threads to finish
+            for t in threads:
+                t.join()
+        finally:
+            # Unregister once per worker process
+            try:
+                self._control_proxy.unregister_worker(self.worker_id)
+            except Exception:
+                pass
+            try:
+                self._control_proxy._pyroRelease()
+            except Exception:
+                pass
+            print(f"[WORKER {self.worker_id}] All local threads stopped, worker shutting down")
+
+    def _thread_main(self, thread_index: int) -> None:
+        """Main loop for each local thread on the worker machine."""
+        worker_tag = f"{self.worker_id}-T{thread_index}"
+        proxy = Pyro5.api.Proxy(self.coordinator_uri)
+        session = requests.Session()
+        session.headers.update(REQUEST_HEADERS)
+        session.max_redirects = 10
+
         try:
             while True:
+                # Global stop check first
                 try:
-                    url = self.proxy.request_url(self.worker_id)
+                    if proxy.should_stop():
+                        print(f"[WORKER {worker_tag}] Coordinator requested stop")
+                        break
                 except Pyro5.errors.CommunicationError:
-                    # Coordinator went away unexpectedly
-                    print(f"[WORKER {self.worker_id}] Lost connection to coordinator, exiting")
+                    print(f"[WORKER {worker_tag}] Lost connection while checking stop flag, exiting")
+                    break
+
+                # Ask coordinator for a URL
+                try:
+                    url = proxy.request_url(worker_tag)
+                except Pyro5.errors.CommunicationError:
+                    print(f"[WORKER {worker_tag}] Lost connection to coordinator, exiting")
                     break
 
                 if url is None:
-                    if self.proxy.should_stop():
-                        print(f"[WORKER {self.worker_id}] Coordinator requested stop")
-                        break
-                    time.sleep(1)
-                    continue
+                    print(f"[WORKER {worker_tag}] No more work (None), exiting")
+                    break
                 elif url == "WAITING":
-                    print(f"[WORKER {self.worker_id}] No work yet, waiting...")
+                    print(f"[WORKER {worker_tag}] No work yet, waiting...")
                     time.sleep(1)
                     continue
-                
-                print(f"[WORKER {self.worker_id}] Crawling {url}")
-                self._crawl(url)
-                print(f"[WORKER {self.worker_id}] Finished {url}")
+
+                print(f"[WORKER {worker_tag}] Crawling {url}")
+                self._crawl(url, proxy, session, worker_tag)
+                print(f"[WORKER {worker_tag}] Finished {url}")
         finally:
-            # Even if we got an exception, try to unregister once
             try:
-                self.proxy.unregister_worker(self.worker_id)
+                proxy._pyroRelease()
             except Exception:
                 pass
-            print(f"[WORKER {self.worker_id}] Stopping crawl as instructed by coordinator")
 
-
-    def _crawl(self, url: str) -> None:
-        self.session.max_redirects = 10
+    def _crawl(self, url: str, proxy: Pyro5.api.Proxy, session: requests.Session, worker_tag: str) -> None:
         try:
-            resp = self.session.get(url, timeout=10, allow_redirects=True)
+            resp = session.get(url, timeout=10, allow_redirects=True)
             resp.raise_for_status()
         except requests.exceptions.TooManyRedirects as exc:
-            # Avoid infinite redirects; just report and stop this URL
             msg = f"{type(exc).__name__}: {exc}"
-            print(f"[WORKER {self.worker_id}] Error fetching {url}: {msg}")
+            print(f"[WORKER {worker_tag}] Error fetching {url}: {msg}")
             try:
-                self.proxy.report_failure(self.worker_id, url, f"TooManyRedirects: {exc}")
+                proxy.report_failure(worker_tag, url, f"TooManyRedirects: {exc}")
             except pyro_errors.CommunicationError:
-                # Coordinator already gone; just ignore
                 pass
             return
         except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            print(f"[WORKER {worker_tag}] Error fetching {url}: {msg}")
             try:
-                self.proxy.report_failure(self.worker_id, url, str(exc))
+                proxy.report_failure(worker_tag, url, msg)
             except pyro_errors.CommunicationError:
                 pass
             return
-        
+
         # If coordinator decided to stop while we were downloading, bail out now
         try:
-            if self.proxy.should_stop():
-                print(f"[WORKER {self.worker_id}] Stop requested after downloading {url}, skipping parse/submit")
-                # mark this as "accessed but not scraped"
-                self.proxy.report_failure(self.worker_id, url, "Skipped due to shutdown")
+            if proxy.should_stop():
+                print(f"[WORKER {worker_tag}] Stop requested after downloading {url}, skipping parse/submit")
+                try:
+                    proxy.report_failure(worker_tag, url, "Skipped due to shutdown")
+                except pyro_errors.CommunicationError:
+                    pass
                 return
         except pyro_errors.CommunicationError:
-            # Coordinator is gone; just stop quietly.
             return
 
         if not is_html_response(resp):
-            print(f"[WORKER {self.worker_id}] Non-HTML / PDF content at {url}")
+            print(f"[WORKER {worker_tag}] Non-HTML / PDF content at {url}")
             try:
-                self.proxy.report_failure(self.worker_id, url, "Non-HTML content")
+                proxy.report_failure(worker_tag, url, "Non-HTML content")
             except pyro_errors.CommunicationError:
                 pass
             return
@@ -225,24 +266,28 @@ class CrawlWorker:
             title = "PDF File"
         else:
             title = soup.title.string.strip() if soup.title else "No title"
+
         links = [a.get("href") for a in soup.find_all("a", href=True)]
-        
+
         # another stop check here
         try:
-            if self.proxy.should_stop():
-                print(f"[WORKER {self.worker_id}] Stop requested while scraping {url}, not submitting to coordinator")
-                self.proxy.report_failure(self.worker_id, url, "Skipped due to shutdown")
+            if proxy.should_stop():
+                print(f"[WORKER {worker_tag}] Stop requested while scraping {url}, not submitting to coordinator")
+                try:
+                    proxy.report_failure(worker_tag, url, "Skipped due to shutdown")
+                except pyro_errors.CommunicationError:
+                    pass
                 return
         except pyro_errors.CommunicationError:
             return
 
         try:
-            self.proxy.submit_page(self.worker_id, url, title, links)
+            proxy.submit_page(worker_tag, url, title, links)
         except pyro_errors.CommunicationError:
-            # Coordinator is gone; no point continuing
             return
 
         time.sleep(0.5)  # polite crawling delay
+
 
 
 def persist_results(coordinator: Coordinator) -> None:
@@ -274,8 +319,8 @@ def start_coordinator(start_url: str, minutes: float, host: str, port: int) -> N
     persist_results(coordinator)
 
 
-def start_worker(uri: str, start_url: str, worker_id: str) -> None:
-    worker = CrawlWorker(uri, start_url, worker_id)
+def start_worker(uri: str, start_url: str, worker_id: str, threads: int = 1) -> None:
+    worker = CrawlWorker(uri, start_url, worker_id, num_threads=threads)
     print(f"[WORKER {worker_id}] Starting crawl")
     worker.run()
     
@@ -293,5 +338,6 @@ def parse_args():
     worker.add_argument("--uri", required=True, help="URI of the coordinator")
     worker.add_argument("--start-url", required=True, dest="start_url")
     worker.add_argument("--worker-id", default="remote")
+    worker.add_argument("--threads", type=int, default=1, help="Local threads per worker machine")
     
     return parser.parse_args()

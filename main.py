@@ -26,7 +26,8 @@ def main():
         start_worker(
             uri=args.uri,
             start_url=args.start_url,
-            worker_id=args.worker_id
+            worker_id=args.worker_id,
+            threads=args.threads
         )
 
 if __name__ == "__main__":
