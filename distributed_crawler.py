@@ -79,17 +79,6 @@ class Coordinator:
     def unregister_worker(self, worker_id: str) -> None:
         with self.lock:
             self.active_workers.discard(worker_id)
-
-            # if this worker had any in-flight URLs, requeue them immediately
-            lost_urls = [u for u, w in self.worker_for_url.items() if w == worker_id]
-            for url in lost_urls:
-                print(
-                    f"[COORD] Worker {worker_id} unregistered with in-flight URL {url}; requeuing"
-                )
-                self.frontier.put(url)
-                self.in_flight.pop(url, None)
-                self.worker_for_url.pop(url, None)
-
         print(f"[COORD] Worker unregistered: {worker_id}")
 
     def can_shutdown(self) -> bool:
@@ -415,6 +404,7 @@ def start_coordinator(
             )
         except Exception as e:
             print(f"[COORD] WARNING: could not register with Name Server at {ns_host}: {e}")
+            return
 
         print("[COORD] Waiting for workers to connect...")
         daemon.requestLoop(loopCondition=lambda: not coordinator.can_shutdown())
