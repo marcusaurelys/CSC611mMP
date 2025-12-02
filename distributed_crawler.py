@@ -290,7 +290,7 @@ class CrawlWorker:
         worker_tag: str,
     ) -> None:
         try:
-            resp = session.get(url, timeout=10, allow_redirects=True)
+            resp = session.get(url, timeout=5, allow_redirects=True)
             resp.raise_for_status()
         except requests.exceptions.TooManyRedirects as exc:
             msg = f"{type(exc).__name__}: {exc}"
