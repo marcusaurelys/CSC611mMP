@@ -24,7 +24,7 @@ def _is_pdf_url(url: str) -> bool:
 
 def is_html_response(resp: requests.Response) -> bool:
     ctype = resp.headers.get("Content-Type", "").lower()
-    return any(ctype.startswith(prefix) for prefix in HTML_MIME_PREFIXES)
+    return ctype.startswith("text/html")
 
 
 def normalize_url(base: str, link: str) -> str | None:
@@ -290,6 +290,7 @@ class CrawlWorker:
         worker_tag: str,
     ) -> None:
         try:
+
             resp = session.get(url, timeout=5, allow_redirects=True)
             resp.raise_for_status()
         except requests.exceptions.TooManyRedirects as exc:
