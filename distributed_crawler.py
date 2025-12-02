@@ -113,12 +113,14 @@ class Coordinator:
             now = time.time()
             with self.lock:
                 stuck = [url for url, ts in self.in_flight.items() if now - ts > timeout]
-                for url in stuck:
-                    worker_id = self.worker_for_url.get(url)
-                    print(
+            for url in stuck:
+                worker_id = self.worker_for_url.get(url)
+                print(
                         f"[COORD] Requeuing stuck URL {url} (previously assigned to {worker_id})"
                     )
-                    self.frontier.put(url)
+                self.frontier.put(url)
+
+                with self.lock:
                     self.in_flight.pop(url, None)
                     self.worker_for_url.pop(url, None)
             time.sleep(5.0)
