@@ -372,7 +372,7 @@ class CrawlWorker:
         except pyro_errors.CommunicationError:
             return
 
-        time.sleep(0.5)  # polite crawling delay
+        time.sleep(1.0)  # polite crawling delay
 
 
 def persist_results(coordinator: Coordinator) -> None:
