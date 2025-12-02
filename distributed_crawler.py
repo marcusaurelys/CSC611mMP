@@ -301,6 +301,7 @@ class CrawlWorker:
                     except pyro_errors.CommunicationError:
                         pass
                     return
+                resp_text = resp.text
         except requests.exceptions.TooManyRedirects as exc:
             msg = f"{type(exc).__name__}: {exc}"
             print(f"[WORKER {worker_tag}] Error fetching {url}: {msg}")
@@ -334,7 +335,7 @@ class CrawlWorker:
             return
 
         try:
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(resp_text, "html.parser")
             if _is_pdf_url(url):
                 title = "PDF File"
             else:
