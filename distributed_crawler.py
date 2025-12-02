@@ -147,28 +147,28 @@ class Coordinator:
             # done with this URL → remove from in-flight tracking
             self.in_flight.pop(url, None)
             self.worker_for_url.pop(url, None)
-
             self.visited.add(url)
             self.results[url] = title
 
             # If we've already decided to stop, don't enqueue any new links
-            if self.stop_event.is_set():
-                print(f"[COORD] Stop flag set; not enqueuing new links from {url}")
-                link_count = 0
-            else:
-                for link in link_list:
-                    normalized = normalize_url(url, link)
-                    if not normalized:
-                        continue
-                    parsed = urllib.parse.urlparse(normalized)
-                    if parsed.netloc != self.start_netloc:
-                        continue
-                    if normalized.endswith("/"):
-                        normalized = normalized[:-1]
-                    if normalized in self.discovered:
-                        continue
+        if self.stop_event.is_set():
+            print(f"[COORD] Stop flag set; not enqueuing new links from {url}")
+            link_count = 0
+        else:
+            for link in link_list:
+                normalized = normalize_url(url, link)
+                if not normalized:
+                    continue
+                parsed = urllib.parse.urlparse(normalized)
+                if parsed.netloc != self.start_netloc:
+                    continue
+                if normalized.endswith("/"):
+                    normalized = normalized[:-1]
+                if normalized in self.discovered:
+                    continue
+                with self.lock:
                     self.discovered.add(normalized)
-                    self.frontier.put(normalized)
+                self.frontier.put(normalized)
                 link_count = len(link_list)
         print(f"[COORD] {worker_id} submitted {url} with {link_count} links")
 
