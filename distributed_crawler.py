@@ -332,13 +332,22 @@ class CrawlWorker:
                 pass
             return
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        if _is_pdf_url(url):
-            title = "PDF File"
-        else:
-            title = soup.title.string.strip() if soup.title else "No title"
+        try:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            if _is_pdf_url(url):
+                title = "PDF File"
+            else:
+                title = soup.title.string.strip() if soup.title else "No title"
 
-        links = [a.get("href") for a in soup.find_all("a", href=True)]
+            links = [a.get("href") for a in soup.find_all("a", href=True)]
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            print(f"[WORKER {worker_tag}] Error parsing {url}: {msg}")
+            try:
+                proxy.report_failure(worker_tag, url, msg)
+            except pyro_errors.CommunicationError:
+                pass
+            return
 
         # another stop check here
         try:
