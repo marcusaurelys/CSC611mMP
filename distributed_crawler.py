@@ -170,7 +170,7 @@ class Coordinator:
                     self.discovered.add(normalized)
                 self.frontier.put(normalized)
                 link_count = len(link_list)
-        print(f"[COORD] {worker_id} submitted {url} with {link_count} links")
+                print(f"[COORD] {worker_id} submitted {url} with {link_count} links")
 
     def report_failure(self, worker_id: str, url: str, reason: str) -> None:
         with self.lock:
