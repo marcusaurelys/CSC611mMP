@@ -1,0 +1,3 @@
+number of pages scraped: 425
+number of urls discovered: 3544
+number of unique urls accessed: 641
