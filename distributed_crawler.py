@@ -292,9 +292,15 @@ class CrawlWorker:
         worker_tag: str,
     ) -> None:
         try:
-
-            resp = session.get(url, timeout=5, allow_redirects=True)
-            resp.raise_for_status()
+            with session.get(url, timeout=5, allow_redirects=True, stream=True) as resp:
+                resp.raise_for_status()
+                if not is_html_response(resp):
+                    print(f"[WORKER {worker_tag}] Non-HTML content at {url}")
+                    try:
+                        proxy.report_failure(worker_tag, url, "Non-HTML content")
+                    except pyro_errors.CommunicationError:
+                        pass
+                    return
         except requests.exceptions.TooManyRedirects as exc:
             msg = f"{type(exc).__name__}: {exc}"
             print(f"[WORKER {worker_tag}] Error fetching {url}: {msg}")
@@ -325,14 +331,6 @@ class CrawlWorker:
                     pass
                 return
         except pyro_errors.CommunicationError:
-            return
-
-        if not is_html_response(resp):
-            print(f"[WORKER {worker_tag}] Non-HTML / PDF content at {url}")
-            try:
-                proxy.report_failure(worker_tag, url, "Non-HTML content")
-            except pyro_errors.CommunicationError:
-                pass
             return
 
         try:
@@ -372,7 +370,7 @@ class CrawlWorker:
         except pyro_errors.CommunicationError:
             return
 
-        time.sleep(1.0)  # polite crawling delay
+        time.sleep(0.5)  # polite crawling delay
 
 
 def persist_results(coordinator: Coordinator) -> None:
